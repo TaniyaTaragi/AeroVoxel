@@ -230,7 +230,8 @@ button svg { flex: none; }
 
 .results-panel {
   z-index: 4; position: absolute; top: 25px; right: 28px; width: min(310px, 42%);
-  max-height: calc(100% - 36px);
+  /* Leave room below the panel for the viewport controls on narrow desktops. */
+  max-height: calc(100% - 109px);
   overflow: auto; padding: 17px; border: 1px solid #30495d; border-radius: 12px;
   background: #101c2af7; box-shadow: 0 15px 55px #0009; scrollbar-color: #3a5468 transparent; scrollbar-width: thin;
 }
