@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { lazy, Suspense, useState, useEffect, useRef, useCallback } from "react";
 import {
   Upload,
   FileImage,
@@ -6,28 +6,34 @@ import {
   ShieldCheck,
   ChevronDown,
   ChevronUp,
-  Car,
-  Plane,
-  Circle,
   Wind,
   Box,
   RotateCcw,
   Pause,
   Play,
-  PanelRightClose,
-  PanelRightOpen,
   ArrowUpRight,
   Home,
+  ChartNoAxesColumnIncreasing,
+  SlidersHorizontal,
+  Grid2X2,
+  X,
 } from "lucide-react";
-import { WindTunnelViewer } from "./components/WindTunnelViewer";
 import type { FlowData } from "./components/WindTunnelViewer";
 import { LandingScreen } from "./components/LandingScreen";
-import { domainHeight, isDemoModel } from "./components/demoModels";
+import { FlowSpeedMap } from "./components/FlowSpeedMap";
+import { domainHeight, isDemoModel } from "./utils/gridGeometry";
 import { fetchNpy } from "./utils/npyLoader";
+import { bundledFieldUrls } from "./utils/bundledFields";
+import { orderSpecimens, specimenFor } from "./studioCases";
+import visualDemoRecord from "../../backend/app/assets/flow/visual_demo_generation.json";
 import { API_BASE_URL } from "./config";
 import type { ActiveCase, ApiDemoCase, DataSource } from "./types";
-import { PROCESSING_STEPS, OFFLINE_PREVIEW } from "./types";
+import { PROCESSING_STEPS } from "./types";
 import "./App.css";
+
+const WindTunnelViewer = lazy(async () => ({
+  default: (await import("./components/WindTunnelViewer")).WindTunnelViewer,
+}));
 
 function toActiveCase(api: ApiDemoCase): ActiveCase {
   return {
@@ -46,15 +52,16 @@ function toActiveCase(api: ApiDemoCase): ActiveCase {
   };
 }
 
-const FALLBACK_CASES: ActiveCase[] = [
+const FALLBACK_CASES = orderSpecimens([
   {
     id: "sports_car",
     backendId: "sports_car_v1",
     name: "Sports Car (Template)",
     desc: "Low-drag ground vehicle profile with rear separation.",
-    drag: 0.28,
-    lift: -0.05,
-    wake: 0.65,
+    drag: visualDemoRecord.cases.sports_car_v1.metrics.drag_coefficient_estimate,
+    lift: visualDemoRecord.cases.sports_car_v1.metrics.lift_coefficient_estimate,
+    wake: visualDemoRecord.cases.sports_car_v1.metrics.wake_score,
+    metricsSource: "Cached CPU field educational proxies",
     mode: "cached_2d",
     modeLabel: "Cached 2D demonstration field",
     explanation:
@@ -65,14 +72,15 @@ const FALLBACK_CASES: ActiveCase[] = [
     id: "drone",
     backendId: "drone_v1",
     name: "Quadcopter (Template)",
-    desc: "Complex vertical thrust profile with high drag wake.",
-    drag: 1.15,
-    lift: 1.42,
-    wake: 0.88,
+    desc: "Stationary quadcopter in crossflow.",
+    drag: visualDemoRecord.cases.drone_v1.metrics.drag_coefficient_estimate,
+    lift: visualDemoRecord.cases.drone_v1.metrics.lift_coefficient_estimate,
+    wake: visualDemoRecord.cases.drone_v1.metrics.wake_score,
+    metricsSource: "Cached CPU field educational proxies",
     mode: "cached_2d",
     modeLabel: "Cached 2D demonstration field",
     explanation:
-      "Flow encounters bluff-body engine mounts and rotor disks. The arms create flow separation and localized vortex shedding.",
+      "The body, arms, and stationary rotors form a side silhouette for this 2D flow field. The rotors do not spin or generate thrust.",
     isCustom: false,
   },
   {
@@ -105,7 +113,7 @@ const FALLBACK_CASES: ActiveCase[] = [
   },
   // sphere_3d_v1 is intentionally omitted from offline fallback: it only appears
   // when backend reports assets (velocity/pressure/mask .npy) are present.
-];
+]);
 
 function App() {
   const [showLanding, setShowLanding] = useState(true);
@@ -178,16 +186,20 @@ function App() {
   const [paused, setPaused] = useState(
     () => window.matchMedia("(prefers-reduced-motion: reduce)").matches,
   );
-  const [cameraView, setCameraView] = useState<"side" | "perspective">("side");
+  const [cameraView, setCameraView] = useState<"side" | "perspective">("perspective");
   const [resetCamera, setResetCamera] = useState(0);
-  const [resultsOpen, setResultsOpen] = useState(true);
+  const [resultsOpen, setResultsOpen] = useState(false);
+  const [optionsOpen, setOptionsOpen] = useState(false);
+  const [showSpeedMap, setShowSpeedMap] = useState(false);
+  const speedMapButtonRef = useRef<HTMLButtonElement>(null);
+  const resultsPanelRef = useRef<HTMLElement>(null);
+  const resultsButtonRef = useRef<HTMLButtonElement>(null);
+  const optionsRef = useRef<HTMLDivElement>(null);
+  const optionsButtonRef = useRef<HTMLButtonElement>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [lastSolverSpeed, setLastSolverSpeed] = useState<number | null>(null);
 
-  const effectiveDataSource: DataSource =
-    backendStatus === "disconnected" && dataSource !== "computed"
-      ? "offline_fallback"
-      : dataSource;
+  const effectiveDataSource = dataSource;
   const effectiveSimModeLabel =
     effectiveDataSource === "offline_fallback"
       ? "Offline fallback — procedural viewer (backend disconnected)"
@@ -215,11 +227,6 @@ function App() {
   const loadFlowForCase = useCallback(
     async (activeCase: ActiveCase, presetOverride?: string | null) => {
       const sequence = ++flowSequence.current;
-      if (backendStatus !== "connected") {
-        setFlowData(null);
-        return;
-      }
-
       setLoadingFlowData(true);
       try {
         let backendCaseId = activeCase.backendId;
@@ -232,17 +239,27 @@ function App() {
           backendCaseId = preset;
         }
 
-        const metaResponse = await fetch(
-          `${API_BASE_URL}/api/flow-field/${backendCaseId}`,
-        );
-        if (!metaResponse.ok) throw new Error("Failed to load metadata");
-        const meta = await metaResponse.json();
-
-        const [velNpy, pressNpy, maskNpy] = await Promise.all([
-          fetchNpy(`${API_BASE_URL}${meta.velocity_url}`),
-          fetchNpy(`${API_BASE_URL}${meta.pressure_url}`),
-          fetchNpy(`${API_BASE_URL}${meta.mask_url}`),
-        ]);
+        const localUrls = bundledFieldUrls(backendCaseId);
+        const readArrays = (urls: NonNullable<ReturnType<typeof bundledFieldUrls>>) =>
+          Promise.all([fetchNpy(urls.velocity_url), fetchNpy(urls.pressure_url), fetchNpy(urls.mask_url)]);
+        const [velNpy, pressNpy, maskNpy] = await (async () => {
+          if (backendStatus === "connected") {
+            try {
+              const response = await fetch(`${API_BASE_URL}/api/flow-field/${backendCaseId}`);
+              if (!response.ok) throw new Error("Could not load demo metadata");
+              const meta = await response.json();
+              return await readArrays({
+                velocity_url: API_BASE_URL + meta.velocity_url,
+                pressure_url: API_BASE_URL + meta.pressure_url,
+                mask_url: API_BASE_URL + meta.mask_url,
+              });
+            } catch (error) {
+              if (!localUrls) throw error;
+            }
+          }
+          if (!localUrls) throw new Error("This specimen has no local field");
+          return readArrays(localUrls);
+        })();
 
         if (sequence !== flowSequence.current) return;
         const nx = velNpy.shape[2];
@@ -265,7 +282,7 @@ function App() {
           );
 
         if (!activeCase.isCustom) {
-          setSimModeLabel(meta.mode_label ?? "Cached 2D demonstration field");
+          setSimModeLabel(activeCase.modeLabel);
           setDataSource(
             activeCase.mode === "real_3d_lbm" ? "real_3d_lbm" : "cached",
           );
@@ -335,7 +352,7 @@ function App() {
         const response = await fetch(`${API_BASE_URL}/api/demo-cases`);
         if (!response.ok) return;
         const cases: ApiDemoCase[] = await response.json();
-        const mapped = cases.map(toActiveCase);
+        const mapped = orderSpecimens(cases.map(toActiveCase));
         // Only list cases the API says are asset-backed (hides sphere until cache exists).
         setDemoCases(mapped.length > 0 ? mapped : FALLBACK_CASES);
         if (!selectedCase.isCustom) {
@@ -356,7 +373,7 @@ function App() {
   }, [backendStatus, selectedCase.isCustom]);
 
   useEffect(() => {
-    if (effectiveDataSource === "computed") return;
+    if (showLanding || effectiveDataSource === "computed") return;
     if (selectedCase.isCustom && !closestPreset) return;
     const load = async () => {
       await loadFlowForCase(selectedCase);
@@ -364,16 +381,44 @@ function App() {
     void load();
   }, [
     selectedCase,
-    backendStatus,
+    showLanding,
     closestPreset,
     effectiveDataSource,
     loadFlowForCase,
   ]);
 
+  const closeResults = useCallback(() => {
+    setResultsOpen(false);
+    resultsButtonRef.current?.focus({ preventScroll: true });
+  }, []);
+
+  useEffect(() => {
+    if (!resultsOpen && !optionsOpen) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      if (optionsOpen) {
+        setOptionsOpen(false);
+        optionsButtonRef.current?.focus();
+      } else closeResults();
+    };
+    const onPointer = (event: PointerEvent) => {
+      if (optionsOpen && event.target instanceof Node && !optionsRef.current?.contains(event.target)) {
+        setOptionsOpen(false);
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    document.addEventListener("pointerdown", onPointer);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.removeEventListener("pointerdown", onPointer);
+    };
+  }, [resultsOpen, optionsOpen, closeResults]);
+
   const runLiveSimulation = async () => {
     if (!activeJobId) return;
     flowSequence.current++;
     setLoadingFlowData(false);
+    setUploadError(null);
     setRunningSolver(true);
     setSimModeLabel("Running educational 2D LBM solver…");
 
@@ -428,60 +473,28 @@ function App() {
       }));
     } catch (err) {
       console.error("Simulation run failed:", err);
-      setSimModeLabel("2D LBM solver failed — showing closest cached field");
-      setDataSource("cached");
-      if (closestPreset) loadFlowForCase(selectedCase, closestPreset);
+      setUploadError("The CPU solver could not finish this run. Check the connection and try again.");
+      setResultsOpen(true);
+      setSimModeLabel("CPU simulation failed");
     } finally {
       setRunningSolver(false);
     }
   };
 
-  const runMockUploadFlow = (file: File) => {
-    setProcessingStepIndex(0);
-    const advance = (step: number, delay: number, done: () => void) => {
-      setTimeout(() => {
-        setProcessingStepIndex(step);
-        done();
-      }, delay);
-    };
-
-    advance(1, 800, () =>
-      advance(2, 800, () =>
-        advance(3, 800, () => {
-          setUploading(false);
-          setContourPreview(OFFLINE_PREVIEW);
-          setClosestPreset("sports_car_v1");
-          setActiveJobId(null);
-          setSolverReady(false);
-          setDataSource("offline_fallback");
-          setSimModeLabel("Offline fallback (cached template)");
-          setScaleEstimate(null);
-          setScaleStatus("Offline mode — scale not detected");
-
-          setSelectedCase({
-            id: "custom_upload",
-            backendId: "custom_upload",
-            name: `Offline: ${file.name.substring(0, 16)}`,
-            desc: "Matched to sports car template (offline fallback).",
-            drag: 0.28,
-            lift: -0.05,
-            wake: 0.65,
-            mode: "cached_2d",
-            modeLabel: "Offline fallback (cached template)",
-            explanation:
-              "Backend unavailable. AeroVoxel matched your upload to the cached sports car demonstration field so the demo keeps running.",
-            isCustom: true,
-          });
-        }),
-      ),
-    );
-  };
-
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    e.target.value = "";
 
     setShowLanding(false);
+    setResultsOpen(true);
+    if (backendStatus !== "connected") {
+      setUploadError("Start the CPU backend to process a capture. The built-in flow fields are available offline.");
+      return;
+    }
+    flowSequence.current++;
+    setFlowData(null);
+    setLoadingFlowData(false);
     setPreviewMask(null);
     setUploadError(null);
     setUploading(true);
@@ -496,11 +509,6 @@ function App() {
     setSurrogatePred(null);
     setSurrogateError(null);
     setMaskForSurrogate(null);
-
-    if (backendStatus !== "connected") {
-      runMockUploadFlow(file);
-      return;
-    }
 
     const formData = new FormData();
     formData.append("file", file);
@@ -528,6 +536,7 @@ function App() {
       const presetCase = demoCases.find(
         (c) => c.backendId === res.closest_preset,
       );
+      setCameraView("side");
 
       setSelectedCase({
         id: "custom_upload",
@@ -577,17 +586,20 @@ function App() {
     }
   };
 
-  const resetToPresets = () => {
+  const selectSpecimen = (caseToOpen: ActiveCase = demoCases[0] ?? FALLBACK_CASES[0]) => {
+    flowSequence.current++;
+    setFlowData(null);
+    setLoadingFlowData(false);
     setPreviewMask(null);
     setUploadError(null);
-    setSelectedCase(demoCases[0] ?? FALLBACK_CASES[0]);
+    setSelectedCase(caseToOpen);
     setUploadedFile(null);
     setContourPreview(null);
     setClosestPreset(null);
     setActiveJobId(null);
     setSolverReady(false);
-    setDataSource("cached");
-    setSimModeLabel("Cached 2D demonstration field");
+    setDataSource(caseToOpen.mode === "real_3d_lbm" ? "real_3d_lbm" : "cached");
+    setSimModeLabel(caseToOpen.modeLabel);
     setScaleEstimate(null);
     setScaleStatus(null);
     setLastSolverAngle(null);
@@ -596,6 +608,8 @@ function App() {
     setSlicePosition(0.0);
     setSurrogatePred(null);
     setSurrogateError(null);
+    setMaskForSurrogate(null);
+    setOptionsOpen(false);
   };
 
   const runSurrogatePredict = async () => {
@@ -653,11 +667,21 @@ function App() {
     }
   };
 
-  const enterDashboard = (mode: "demo" | "upload") => {
-    setShowLanding(false);
-    if (mode === "upload") {
+  const chooseCapture = () => {
+    if (backendStatus === "connected") {
       uploadInputRef.current?.click();
+    } else {
+      setShowLanding(false);
+      setResultsOpen(true);
+      setUploadError("Start the CPU backend to process a capture. The built-in flow fields are available offline.");
     }
+  };
+
+  const openOverview = () => {
+    setShowLanding(true);
+    setOptionsOpen(false);
+    setShowSpeedMap(false);
+    window.scrollTo(0, 0);
   };
 
   const angleNeedsRerun =
@@ -677,11 +701,15 @@ function App() {
           style={{ display: "none" }}
         />
         <LandingScreen
-          onTryDemo={() => {
+          cases={demoCases}
+          onTryDemo={(id) => {
             setShowLanding(false);
-            resetToPresets();
+            setResultsOpen(false);
+            setCameraView("perspective");
+            selectSpecimen(demoCases.find((item) => item.id === id));
+            window.scrollTo(0, 0);
           }}
-          onUpload={() => enterDashboard("upload")}
+          onUpload={chooseCapture}
         />
       </>
     );
@@ -706,6 +734,7 @@ function App() {
       if (!response.ok) throw new Error(body.detail ?? "Mask import failed");
       const mask = await fetchNpy(`${API_BASE_URL}${body.mask_url}`);
       setFlowData(null);
+      setCameraView("side");
       setPreviewMask({
         mask: mask.data as Uint8Array,
         nx: mask.shape[1],
@@ -746,46 +775,56 @@ function App() {
     }
   };
 
+  const mapActive = showSpeedMap && flowData !== null && !previewMask;
   const smoothDemo =
-    isDemoModel(selectedCase.id) && !showVoxels && !previewMask;
+    isDemoModel(selectedCase.id) && !showVoxels && !previewMask && !mapActive;
   const geometryLabel = smoothDemo
     ? "Smooth demo model"
     : "Solver mask geometry";
   const displayGrid = flowData ?? previewMask;
-  const sliceLimit = domainHeight(displayGrid) / 2 - 0.1;
+  // Keep the range bounds on the 0.1 step grid so its midpoint is exactly zero.
+  const sliceLimit = Math.max(0, Math.floor((domainHeight(displayGrid) / 2 - 0.1) * 10) / 10);
   const sourceLabel = previewMask
-    ? "Imported mask · ready to simulate"
+    ? "Mask ready"
+    : loadingFlowData
+      ? "Loading flow field"
     : !flowData
-      ? "Illustrative preview · no loaded field"
+      ? "Illustrative preview"
       : effectiveDataSource === "computed"
         ? "Live 2D LBM field"
         : effectiveDataSource === "real_3d_lbm"
           ? "Offline 3D center slice"
-          : effectiveDataSource === "offline_fallback"
-            ? "Illustrative preview · offline"
-            : "Cached 2D demonstration";
-  const caseIcon = (id: string) =>
-    id.includes("car") ? (
-      <Car />
-    ) : id.includes("drone") ? (
-      <Box />
-    ) : id.includes("airfoil") ? (
-      <Plane />
-    ) : (
-      <Circle />
-    );
+          : "Cached CPU field";
+  const specimen = specimenFor(selectedCase.id);
+  const busy = uploading || runningSolver;
+  const canAdjustInlet = Boolean(activeJobId);
+  const toggleResults = () => {
+    if (resultsOpen) {
+      closeResults();
+      return;
+    }
+    setResultsOpen(true);
+    setOptionsOpen(false);
+    requestAnimationFrame(() => {
+      resultsPanelRef.current?.focus({ preventScroll: true });
+      if (window.matchMedia("(max-width: 760px)").matches) {
+        resultsPanelRef.current?.scrollIntoView({ block: "nearest" });
+      }
+    });
+  };
 
   return (
-    <div className={`app-container ${resultsOpen ? "" : "results-collapsed"}`}>
+    <div className={resultsOpen ? "app-container results-open" : "app-container"}>
       <header className="app-header">
         <button
           className="brand"
-          onClick={() => setShowLanding(true)}
+          onClick={openOverview}
           aria-label="AeroVoxel home"
         >
-          <span className="logo-icon">AV</span>
+          <span className="logo-icon"><Wind size={19} /></span>
           <strong>AeroVoxel</strong>
-          <span className="logo-badge">LAB</span>
+          <span className="brand-divider" />
+          <span className="brand-context">Wind tunnel</span>
         </button>
         <div className="header-actions">
           <button
@@ -802,14 +841,14 @@ function App() {
           <span className="connection-status">
             <i className={backendStatus} />
             {backendStatus === "connected"
-              ? "Backend connected"
-              : "Offline preview"}
+              ? "CPU solver online"
+              : "Offline demo"}
           </span>
           <button
             className="primary-button"
             aria-label="Upload capture"
             disabled={uploading || runningSolver}
-            onClick={() => uploadInputRef.current?.click()}
+            onClick={chooseCapture}
           >
             <Upload size={17} />
             <span>Upload capture</span>
@@ -830,79 +869,77 @@ function App() {
           hidden
         />
       </header>
-      <nav className="object-picker" aria-label="Demo objects">
-        {demoCases.map((c) => (
-          <button
-            key={c.backendId}
-            disabled={uploading || runningSolver}
-            className={`object-choice ${selectedCase.backendId === c.backendId ? "selected" : ""}`}
-            aria-pressed={selectedCase.backendId === c.backendId}
-            onClick={() => {
-              resetToPresets();
-              setSelectedCase(c);
-              setDataSource(
-                c.mode === "real_3d_lbm" ? "real_3d_lbm" : "cached",
-              );
-              setSimModeLabel(c.modeLabel);
-              setMaskForSurrogate(null);
-            }}
-          >
-            {caseIcon(c.id)}
-            <span>
-              <strong>
-                {c.name.replace(" (Template)", "").replace(" (Validation)", "")}
-              </strong>
-              <small>{c.desc}</small>
-            </span>
-          </button>
-        ))}
-        {uploadedFile && (
-          <button
-            className="object-choice selected custom-choice"
-            disabled={uploading || runningSolver}
-            onClick={resetToPresets}
-          >
-            <FileImage />
-            <span>
-              <strong>{uploadedFile}</strong>
-              <small>Custom capture · click to reset</small>
-            </span>
-          </button>
-        )}
-      </nav>
       <main className="experiment-workspace">
-        <section className="viewer-section" aria-label="Wind tunnel">
-          <WindTunnelViewer
-            caseId={selectedCase.id}
-            windSpeed={windSpeed}
-            windAngle={windAngle}
-            showStreamlines={showStreamlines}
-            showPressure={showPressure}
-            showWake={showWake}
-            flowData={flowData}
-            previewMask={previewMask}
-            showVoxels={showVoxels}
-            showSlicePlane={showSlicePlane}
-            slicePosition={slicePosition}
-            paused={paused}
-            cameraView={cameraView}
-            resetCamera={resetCamera}
-            onFpsUpdate={setFps}
-          />
-          <div
-            className="viewer-source"
-            title="Cached fields keep their original inlet conditions. Re-run a custom simulation to apply wind parameters."
-          >
-            <span className="source-dot" />
-            {sourceLabel}
-            {loadingFlowData && " · Loading…"}
+        <nav className="object-picker" aria-label="Specimen library">
+          <div className="library-heading"><h2>Specimens</h2><span>{demoCases.length}</span></div>
+          <div className="object-list">
+            {demoCases.map((item) => {
+              const card = specimenFor(item.id);
+              const selected = selectedCase.backendId === item.backendId;
+              return (
+                <button
+                  key={item.backendId}
+                  disabled={busy}
+                  className={`object-choice ${selected ? "selected" : ""}`}
+                  aria-pressed={selected}
+                  onClick={() => {
+                    if (selected) return;
+                    selectSpecimen(item);
+                  }}
+                >
+                  {card ? <img src={card.image} alt="" /> : <Box size={21} />}
+                  <span><strong>{card?.name ?? item.name}</strong><small>{card?.category ?? item.desc}</small></span>
+                </button>
+              );
+            })}
+            {uploadedFile && <div className="custom-choice"><FileImage size={20} /><span><strong>{uploadedFile}</strong><small>Custom capture</small></span></div>}
           </div>
-          {flowData && effectiveDataSource !== "computed" && (
-            <div className="field-hint">
-              Cached inlet conditions · wind changes apply on a custom run
+          <button className="library-home" onClick={openOverview}>
+            <Home size={16} /> Overview
+          </button>
+        </nav>
+        <section className="viewer-section" aria-label="Wind tunnel">
+          <div className="scene-webgl" aria-hidden={mapActive || undefined}>
+            <Suspense fallback={<div className="working-overlay" role="status"><span className="spinner" /><strong>Opening the tunnel</strong></div>}>
+              <WindTunnelViewer
+                caseId={selectedCase.id}
+                windSpeed={effectiveDataSource === "computed" ? lastSolverSpeed ?? windSpeed : 15}
+                windAngle={windAngle}
+                showStreamlines={showStreamlines}
+                showPressure={showPressure}
+                showWake={showWake}
+                flowData={flowData}
+                previewMask={previewMask}
+                showVoxels={showVoxels}
+                showSlicePlane={showSlicePlane}
+                slicePosition={slicePosition}
+                paused={paused}
+                active={!mapActive}
+                cameraView={cameraView}
+                resetCamera={resetCamera}
+                onFpsUpdate={setFps}
+              />
+            </Suspense>
+          </div>
+          {mapActive && flowData && <FlowSpeedMap flow={flowData} />}
+          <div className="scene-title">
+            <div className={`viewer-source ${flowData ? "with-field" : ""}`} role="status">
+              <span className="source-dot" />
+              {sourceLabel}
             </div>
-          )}
-          <div className="camera-toolbar" aria-label="Camera controls">
+            <h1>{specimen?.name ?? (previewMask ? "Imported mask" : selectedCase.name)}</h1>
+            {specimen && <p>{specimen.category}</p>}
+          </div>
+          <div className="camera-toolbar" aria-label="View controls">
+            {mapActive && (
+              <button onClick={() => {
+                setShowSpeedMap(false);
+                speedMapButtonRef.current?.focus({ preventScroll: true });
+              }}>
+                3D view
+              </button>
+            )}
+          {!mapActive && <>
             <button
               aria-pressed={cameraView === "side"}
               className={cameraView === "side" ? "active" : ""}
@@ -923,65 +960,73 @@ function App() {
             >
               <RotateCcw size={16} />
             </button>
+          </>}
             <button
-              onClick={() => setResultsOpen((v) => !v)}
-              aria-label={resultsOpen ? "Collapse results" : "Show results"}
-              aria-expanded={resultsOpen}
+              ref={speedMapButtonRef}
+              disabled={!flowData || Boolean(previewMask)}
+              aria-pressed={mapActive}
+              className={mapActive ? "active speed-map-trigger" : "speed-map-trigger"}
+              onClick={() => {
+                setShowSpeedMap((value) => !value);
+                setOptionsOpen(false);
+              }}
             >
-              {resultsOpen ? (
-                <PanelRightClose size={17} />
-              ) : (
-                <PanelRightOpen size={17} />
-              )}
+              <Grid2X2 size={15} /> Speed map
             </button>
           </div>
           <div className="control-dock">
-            <label className="dock-slider">
-              <span>
-                <Wind size={16} />
-                Wind speed <output>{windSpeed} m/s</output>
-              </span>
-              <input
-                aria-label="Wind speed"
-                type="range"
-                min="5"
-                max="40"
-                value={windSpeed}
-                onChange={(e) => setWindSpeed(Number(e.target.value))}
-              />
-            </label>
-            <label className="dock-slider">
-              <span>
-                <ArrowUpRight size={16} />
-                Inlet angle <output>{windAngle}°</output>
-              </span>
-              <input
-                aria-label="Inlet angle"
-                type="range"
-                min="-30"
-                max="30"
-                value={windAngle}
-                onChange={(e) => setWindAngle(Number(e.target.value))}
-              />
-            </label>
-            <ToggleRow
-              label="Flow paths"
-              active={showStreamlines}
-              onToggle={() => setShowStreamlines((v) => !v)}
-            />
-            <ToggleRow
-              label="Pressure"
-              active={showPressure}
-              onToggle={() => setShowPressure((v) => !v)}
-            />
+            {!mapActive && <>
             <button
               className="pause-button"
-              aria-pressed={paused}
+              aria-label={paused ? "Play airflow" : "Pause airflow"}
               onClick={() => setPaused((v) => !v)}
             >
               {paused ? <Play size={17} /> : <Pause size={17} />}
-              {paused ? "Play" : "Pause"}
+              <span>{paused ? "Play" : "Pause"}</span>
             </button>
+            <span className="dock-divider" />
+            <div className="options-anchor" ref={optionsRef}>
+              <button
+                ref={optionsButtonRef}
+                className="dock-button"
+                aria-label="Display"
+                onClick={() => setOptionsOpen((value) => !value)}
+                aria-expanded={optionsOpen}
+                aria-controls="viewer-options"
+              >
+                <SlidersHorizontal size={17} /> <span>Display</span>
+              </button>
+              <div className="viewer-options" id="viewer-options" hidden={!optionsOpen}>
+                <strong>Display layers</strong>
+                <ToggleRow label="Flow paths" active={showStreamlines} onToggle={() => setShowStreamlines((v) => !v)} />
+                <ToggleRow label="Pressure" active={showPressure} onToggle={() => setShowPressure((v) => !v)} />
+                <ToggleRow label="Wake detail" active={showWake} onToggle={() => setShowWake((v) => !v)} />
+                <ToggleRow label="Voxel geometry" active={showVoxels} onToggle={() => setShowVoxels((v) => !v)} />
+                <ToggleRow label="Slice plane" active={showSlicePlane} onToggle={() => setShowSlicePlane((v) => !v)} />
+                {showSlicePlane && (
+                  <label className="dock-slider">
+                    <span>Plane height <output>{slicePosition.toFixed(1)}</output></span>
+                    <input aria-label="Slice plane height" type="range" min={-sliceLimit} max={sliceLimit} step="0.1" value={slicePosition} onChange={(e) => setSlicePosition(Number(e.target.value))} />
+                  </label>
+                )}
+              </div>
+            </div>
+            </>}
+            <button
+              ref={resultsButtonRef}
+              className="dock-button results-trigger"
+              aria-label={resultsOpen ? "Collapse results" : "Show results"}
+              aria-expanded={resultsOpen}
+              aria-controls="results-panel"
+              onClick={toggleResults}
+            >
+              <ChartNoAxesColumnIncreasing size={17} /> <span>Results</span>
+            </button>
+            {canAdjustInlet && (
+              <button className="primary-button run-button" disabled={busy || backendStatus !== "connected"} onClick={runLiveSimulation}>
+                <Play size={15} /> {solverReady ? "Run 2D simulation" : "Run again"}
+              </button>
+            )}
           </div>
           {(uploading || runningSolver) && (
             <div className="working-overlay" role="status">
@@ -1001,16 +1046,19 @@ function App() {
         </section>
         <aside
           className="results-panel"
+          id="results-panel"
+          ref={resultsPanelRef}
+          tabIndex={-1}
           aria-label="Results and object details"
           hidden={!resultsOpen}
         >
           <div className="results-heading">
             <h2>Results</h2>
             <button
-              aria-label="Collapse results"
-              onClick={() => setResultsOpen(false)}
+              aria-label="Close results"
+              onClick={closeResults}
             >
-              <PanelRightClose size={18} />
+              <X size={18} />
             </button>
           </div>
           <div className="results-origin">
@@ -1018,6 +1066,7 @@ function App() {
             <span>
               {previewMask
                 ? "Geometry preview"
+                : !flowData ? "Illustrative preview"
                 : effectiveDataSource === "computed"
                   ? "Educational solver estimates"
                   : selectedCase.metricsSource
@@ -1026,6 +1075,7 @@ function App() {
               <small>
                 {previewMask
                   ? "No simulation has run yet"
+                  : !flowData ? "Load a flow field to see estimates"
                   : effectiveDataSource === "computed"
                     ? "Computed for your silhouette"
                     : selectedCase.metricsSource
@@ -1034,24 +1084,21 @@ function App() {
               </small>
             </span>
           </div>
-          {!previewMask && (
-            <>
+          {flowData && !previewMask && (
+            <div className="metrics-grid">
               <MetricBox
-                label="Drag coefficient (Cd)"
+                label="Drag (Cd)"
                 value={selectedCase.drag.toFixed(2)}
-                desc="Educational resistance estimate"
               />
               <MetricBox
-                label="Lift coefficient (Cl)"
+                label="Lift (Cl)"
                 value={selectedCase.lift.toFixed(2)}
-                desc="Educational lift estimate"
               />
               <MetricBox
                 label="Wake index"
                 value={selectedCase.wake.toFixed(2)}
-                desc="Qualitative wake indicator"
               />
-            </>
+            </div>
           )}
           {previewMask && (
             <p className="notice">
@@ -1069,22 +1116,22 @@ function App() {
               <h3>Your capture</h3>
               <p>{uploadedFile}</p>
               {contourPreview && (
-                <img src={contourPreview} alt="Detected object contour" />
+                <img src={contourPreview} alt={previewMask || selectedCase.id === "custom_reconstruction" ? "Solver mask preview" : "Capture preview"} />
               )}
               {scaleStatus && <small>{scaleStatus}</small>}
-              {activeJobId && (
-                <button
-                  className="primary-button"
-                  disabled={runningSolver}
-                  onClick={runLiveSimulation}
-                >
-                  {angleNeedsRerun
-                    ? "Re-run with new parameters"
-                    : solverReady
-                      ? "Run 2D simulation"
-                      : "Run again"}
-                </button>
-              )}
+            </section>
+          )}
+          {canAdjustInlet && (
+            <section className="inlet-settings" aria-label="Inlet settings">
+              <h3>Inlet settings</h3>
+              <label className="dock-slider">
+                <span><Wind size={15} /> Wind speed <output>{windSpeed} m/s</output></span>
+                <input aria-label="Wind speed" type="range" min="5" max="40" value={windSpeed} disabled={busy} onChange={(e) => setWindSpeed(Number(e.target.value))} />
+              </label>
+              <label className="dock-slider">
+                <span><ArrowUpRight size={15} /> Inlet angle <output>{windAngle}°</output></span>
+                <input aria-label="Inlet angle" type="range" min="-30" max="30" value={windAngle} disabled={busy} onChange={(e) => setWindAngle(Number(e.target.value))} />
+              </label>
             </section>
           )}
           {angleNeedsRerun && (
@@ -1133,7 +1180,9 @@ function App() {
             <p>{selectedCase.explanation}</p>
             <p>
               {flowData
-                ? smoothDemo
+                ? mapActive
+                  ? "The map colors the solver's fluid cells by speed. The dark silhouette marks the solid obstacle."
+                  : smoothDemo
                   ? selectedCase.id === "sports_car" ||
                     selectedCase.id === "drone"
                     ? "Airflow is computed from this model's side silhouette on a coarse 2D grid. Enable voxel geometry to inspect the cells. The 3D view adds depth for inspection; the airflow remains 2D."
@@ -1141,38 +1190,6 @@ function App() {
                   : "Airflow and voxel geometry use the loaded 2D solver mask."
                 : "The offline scene is an illustrative flow preview, not a computed simulation."}
             </p>
-          </details>
-          <details className="physics-details">
-            <summary>More view controls</summary>
-            <ToggleRow
-              label="Wake detail"
-              active={showWake}
-              onToggle={() => setShowWake((v) => !v)}
-            />
-            <ToggleRow
-              label="Voxel geometry"
-              active={showVoxels}
-              onToggle={() => setShowVoxels((v) => !v)}
-            />
-            <ToggleRow
-              label="Slice plane"
-              active={showSlicePlane}
-              onToggle={() => setShowSlicePlane((v) => !v)}
-            />
-            {showSlicePlane && (
-              <label className="slice-label">
-                Plane height{" "}
-                <input
-                  aria-label="Slice plane height"
-                  type="range"
-                  min={-sliceLimit}
-                  max={sliceLimit}
-                  step="0.1"
-                  value={slicePosition}
-                  onChange={(e) => setSlicePosition(Number(e.target.value))}
-                />
-              </label>
-            )}
           </details>
           <button
             className="technical-toggle"
@@ -1208,7 +1225,7 @@ function App() {
                     : "Procedural preview"
                 }
               />
-              <DetailRow label="Rendering" value={`${fps} FPS · WebGL`} />
+              <DetailRow label="Rendering" value={mapActive ? "2D speed map" : `${fps} FPS · WebGL`} />
               <p>{effectiveSimModeLabel}</p>
               <p>
                 Prototype geometry and educational flow. Not certified
@@ -1223,14 +1240,7 @@ function App() {
           <ShieldCheck size={14} />
           Educational prototype
         </span>
-        <span>
-          {selectedCase.name} ·{" "}
-          {previewMask ? "Imported solver mask" : geometryLabel}
-        </span>
-        <button onClick={() => setShowLanding(true)}>
-          <Home size={14} />
-          Overview
-        </button>
+        <span>{displayGrid ? `${displayGrid.nx} × ${displayGrid.ny} grid` : "Preview"}</span>
       </footer>
     </div>
   );
@@ -1261,17 +1271,14 @@ function ToggleRow({
 function MetricBox({
   label,
   value,
-  desc,
 }: {
   label: string;
   value: string;
-  desc: string;
 }) {
   return (
     <div className="metric-box">
       <span>{label}</span>
       <strong>{value}</strong>
-      <small>{desc}</small>
     </div>
   );
 }

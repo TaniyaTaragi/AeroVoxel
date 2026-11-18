@@ -33,6 +33,7 @@ interface Props {
   showSlicePlane: boolean;
   slicePosition: number;
   paused?: boolean;
+  active?: boolean;
   cameraView?: "side" | "perspective";
   resetCamera?: number;
   onFpsUpdate?: (fps: number) => void;
@@ -153,6 +154,7 @@ export function WindTunnelViewer(props: Props) {
     let framedGrid: MaskGrid | null | undefined;
     const placeCamera = () => {
       const side = latest.current.cameraView !== "perspective";
+      const cylinder = latest.current.caseId === "cylinder" && !latest.current.showVoxels;
       const tangent = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
       const distance = Math.max(
         5,
@@ -160,8 +162,8 @@ export function WindTunnelViewer(props: Props) {
         (fitSize.x * 1.6 + fitSize.z * 0.35) / (2 * tangent * camera.aspect),
       );
       camera.position.set(
-        focus.x + (side ? 0 : -distance * 0.7),
-        focus.y + (side ? 0 : distance * 0.32),
+        focus.x + (side ? 0 : -distance * (cylinder ? 0.88 : 0.7)),
+        focus.y + (side ? 0 : distance * (cylinder ? 0.30 : 0.32)),
         side ? distance : distance * 0.85,
       );
       controls.target.copy(focus);
@@ -622,6 +624,12 @@ export function WindTunnelViewer(props: Props) {
       frames = 0;
     const animate = (now: number) => {
       const p = latest.current;
+      if (p.active === false) {
+        lastTime = fpsTime = now;
+        frames = 0;
+        frame = requestAnimationFrame(animate);
+        return;
+      }
       const assetReady = hasDetailedCar();
       if (assetReady !== detailedLoaded) {
         detailedLoaded = assetReady;

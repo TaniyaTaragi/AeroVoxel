@@ -1,11 +1,10 @@
 import * as THREE from "three";
 import sharedGeometry from "../../../shared/demoGeometry.json" with { type: "json" };
+import { cellSize } from "../utils/gridGeometry.ts";
+import type { MaskGrid } from "../utils/gridGeometry.ts";
 
-export type MaskGrid = { mask: Uint8Array; nx: number; ny: number };
-export const cellSize = (grid: Pick<MaskGrid, "nx">) =>
-  16 / Math.max(grid.nx - 1, 1);
-export const domainHeight = (grid?: Pick<MaskGrid, "nx" | "ny"> | null) =>
-  grid ? cellSize(grid) * (grid.ny - 1) : 8;
+export { cellSize, domainHeight, isDemoModel } from "../utils/gridGeometry.ts";
+export type { MaskGrid } from "../utils/gridGeometry.ts";
 export function maskBounds(grid: MaskGrid) {
   const step = cellSize(grid);
   const bounds = new THREE.Box3();
@@ -19,8 +18,6 @@ export function maskBounds(grid: MaskGrid) {
   bounds.expandByScalar(step / 2);
   return bounds;
 }
-export const isDemoModel = (id: string) =>
-  /^(sports_car|drone|airfoil|cylinder|sphere_3d)(_v1)?$/.test(id);
 
 // Original finite-trailing-edge NACA four-digit thickness distribution, as in
 // the cache generator. Reference: https://tmbwg.github.io/turbmodels/naca0012_val.html
@@ -428,6 +425,48 @@ function droneModel() {
   }
   return group;
 }
+
+// The end treatment is part of the display model. The solver mask is unchanged.
+function cylinderModel(radius: number, center: THREE.Vector3) {
+  const group = new THREE.Group();
+  const depth = 1.42;
+  const bevel = Math.min(radius * 0.065, 0.065);
+  const profile = [
+    [0, -depth],
+    [radius - bevel, -depth],
+    [radius - bevel * 0.28, -depth + bevel * 0.22],
+    [radius, -depth + bevel],
+    [radius, depth - bevel],
+    [radius - bevel * 0.28, depth - bevel * 0.22],
+    [radius - bevel, depth],
+    [0, depth],
+  ].map(([x, y]) => new THREE.Vector2(x, y));
+
+  const body = new THREE.LatheGeometry(profile, 96).rotateX(Math.PI / 2);
+  const metal = new THREE.MeshPhysicalMaterial({
+    color: 0x93b4c8,
+    metalness: 0.74,
+    roughness: 0.3,
+    clearcoat: 0.24,
+    clearcoatRoughness: 0.43,
+    envMapIntensity: 0.7,
+  });
+  group.add(mesh(body, metal));
+  for (const face of [-1, 1]) {
+    for (const [scale, shade] of [[0.74, 0x556c80], [0.87, 0x7896aa]]) {
+      const ring = mesh(
+        new THREE.RingGeometry(radius * scale, radius * (scale + 0.009), 96),
+        new THREE.MeshStandardMaterial({ color: shade, metalness: 0.58, roughness: 0.48 }),
+        [0, 0, face * (depth + 0.001)],
+      );
+      if (face < 0) ring.rotation.y = Math.PI;
+      group.add(ring);
+    }
+  }
+  group.position.copy(center);
+  return group;
+}
+
 export function createDemoModel(id: string, grid?: MaskGrid | null) {
   const group = new THREE.Group();
   const silver = new THREE.MeshStandardMaterial({
@@ -489,13 +528,8 @@ export function createDemoModel(id: string, grid?: MaskGrid | null) {
     );
   } else if (id.includes("cylinder")) {
     const radius = bounds ? Math.max(size.x, size.y) / 2 : 1.1;
-    const cylinder = mesh(
-      new THREE.CylinderGeometry(radius, radius, 2.6, 64),
-      silver,
-      [center.x, center.y, 0],
-    );
-    cylinder.rotation.x = Math.PI / 2;
-    group.add(cylinder);
+    silver.dispose();
+    group.add(cylinderModel(radius, center));
   } else {
     const model = id.includes("car") ? detailedCarModel() : droneModel();
     const natural = new THREE.Box3().setFromObject(model),
